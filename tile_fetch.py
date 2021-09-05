@@ -37,7 +37,7 @@ def compute_url(path, token, x, y, z):
 
 
 class ImageInfo(object):
-    RE_URL_PATH_TOKEN = re.compile(rb']\r?\n,"(//[^"/]+/[^"/]+)",(?:"([^"]+)"|null)', re.MULTILINE)
+    RE_URL_PATH_TOKEN = re.compile(rb'],"(//[^"/]+/[^"/]+)",(?:"([^"]+)"|null)', re.MULTILINE)
 
     def __init__(self, url):
         page_source = urllib.request.urlopen(url).read()
