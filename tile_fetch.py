@@ -19,41 +19,59 @@ from lxml import etree
 import async_tile_fetcher
 from decryption import decrypt
 
-IV = bytes.fromhex("7b2b4e23de2cc5c5")
+IV = bytes.fromhex("7b2b4e23de2cc5c5") # for DL tile
 
+DEBUG = 1
 
-def compute_url(path, token, x, y, z):
+def compute_url(host, path, token, x, y, z):
     """
-    >>> path = b'wGcDNN8L-2COcm9toX5BTp6HPxpMPPPuxrMU-ZL-W-nDHW8I_L4R5vlBJ6ITtlmONQ'
+    >>> path = b'ci/wGcDNN8L-2COcm9toX5BTp6HPxpMPPPuxrMU-ZL-W-nDHW8I_L4R5vlBJ6ITtlmONQ' # 20240503 mgm
     >>> token = b'KwCgJ1QIfgprHn0a93x7Q-HhJ04'
-    >>> compute_url(path, token, 0, 0, 7)
+    >>> compute_url(host, path, token, 0, 0, 7)
     'https://lh3.googleusercontent.com/wGcDNN8L-2COcm9toX5BTp6HPxpMPPPuxrMU-ZL-W-nDHW8I_L4R5vlBJ6ITtlmONQ=x0-y0-z7-tHeJ3xylnSyyHPGwMZimI4EV3JP8'
     """
+
     sign_path = b'%s=x%d-y%d-z%d-t%s' % (path, x, y, z, token)
+
     encoded = hmac.new(IV, sign_path, 'sha1').digest()
     signature = base64.b64encode(encoded, b'__')[:-1]
-    url_bytes = b'https://lh3.googleusercontent.com/%s=x%d-y%d-z%d-t%s' % (path, x, y, z, signature)
+
+    url_bytes = b'https:%s%s=x%d-y%d-z%d-t%s' % (host, path, x, y, z, signature)
+ 
     return url_bytes.decode('utf-8')
 
-
 class ImageInfo(object):
-    RE_URL_PATH_TOKEN = re.compile(rb'],"(//[^"/]+/[^"/]+)",(?:"([^"]+)"|null)', re.MULTILINE)
+
+    RE_URL_PATH_TOKEN = re.compile(rb']],"(//[^"/]+/)(ci/[^"]+)",(?:"([^"]+)"|null)', re.MULTILINE) # con //lh3.googleusercontent.com/ ci/... token
 
     def __init__(self, url):
         page_source = urllib.request.urlopen(url).read()
 
         match = self.RE_URL_PATH_TOKEN.search(page_source)
+
+        if DEBUG:
+            print("\nmatch...\n")
+            if match:
+                for i in range(len(match.groups())+1):
+                    print("[%d] - %s" % (i, match[i]))
+                print("\n")
+
         if match is None:
             raise ValueError("Unable to find google arts image token")
-        url_no_proto, token = match.groups()
+        self.host, self.path, token = match.groups()
+        url_no_proto = self.host+self.path
+
         assert url_no_proto, "Unable to extract required information from the page"
-        self.path = url_no_proto.rsplit(b'/', 1)[1]
+
         self.token = token or b''
         url_path = urllib.parse.unquote_plus(urllib.parse.urlparse(url).path)
+
         self.image_slug, image_id = url_path.split('/')[-2:]
+
         self.image_name = '%s - %s' % (string.capwords(self.image_slug.replace("-"," ")), image_id)
 
         meta_info_url = "https:{}=g".format(url_no_proto.decode('utf8'))
+
         meta_info_tree = etree.fromstring(urllib.request.urlopen(meta_info_url).read())
         self.tile_width = int(meta_info_tree.attrib['tile_width'])
         self.tile_height = int(meta_info_tree.attrib['tile_height'])
@@ -63,7 +81,7 @@ class ImageInfo(object):
         ]
 
     def url(self, x, y, z):
-        return compute_url(self.path, self.token, x, y, z)
+        return compute_url(self.host, self.path, self.token, x, y, z)
 
     def __repr__(self):
         return '{} - zoom levels:\n{}'.format(
@@ -98,15 +116,16 @@ class ZoomLevelInfo(object):
 
 
 async def fetch_tile(session, image_info, tiles_dir, x, y, z):
-    file_path = tiles_dir / ('%sx%sx%s.jpg' % (x, y, z))
+    file_path = tiles_dir / ('z%s-x%s-y%s.jpg' % (z, x, y))
     image_url = image_info.url(x, y, z)
     encrypted_bytes = await async_tile_fetcher.fetch(session, image_url, file_path)
+
     return x, y, encrypted_bytes
 
 
 async def load_tiles(info, z=-1, outfile=None, quality=90):
     if z >= len(info.tile_info):
-        print(
+        if DEBUG: print(
             'Invalid zoom level {z}. '
             'The maximum zoom level is {max}, using that instead.'.format(
                 z=z,
@@ -129,19 +148,23 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
                 range(level.num_tiles_x),
                 range(level.num_tiles_y))
         ]
-        print("Downloading tiles...")
+        if DEBUG: print("Downloading tiles...")
         tiles = await async_tile_fetcher.gather_progress(awaitable_tiles)
 
     for x, y, encrypted_bytes in tiles:
         clear_bytes = decrypt(encrypted_bytes)
         tile_img = Image.open(io.BytesIO(clear_bytes))
+
+
+        tile_img.save(tiles_dir / ('z%s-x%s-y%s.jpg' % (z, x, y))) # tile decrypt
+
         img.paste(tile_img, (x * info.tile_width, y * info.tile_height))
 
-    print("Downloaded all tiles. Saving...")
+    if DEBUG: print("Downloaded all tiles. Saving...")
     final_image_filename = outfile or (info.image_name + '.jpg')
     img.save(final_image_filename, quality=quality, subsampling=0)
-    shutil.rmtree(tiles_dir)
-    print("Saved the result as " + final_image_filename)
+    # shutil.rmtree(tiles_dir)
+    if DEBUG: print("Saved the result as: " + final_image_filename)
 
 
 def main():
@@ -150,7 +173,7 @@ def main():
     parser = argparse.ArgumentParser(description='Download all image tiles from Google Arts and Culture website')
     parser.add_argument('url', type=str, nargs='?', help='an artsandculture.google.com url')
     parser.add_argument('--zoom', type=int, nargs='?',
-                        help='Zoom level to fetch, can be negative. Will print zoom levels if omitted')
+                        help='Zoom level to fetch, can be negative. Will if DEBUG: print zoom levels if omitted')
     parser.add_argument('--outfile', type=str, nargs='?',
                         help='The name of the file to create.')
     parser.add_argument('--quality', type=int, nargs='?', default=90,
@@ -160,19 +183,19 @@ def main():
     assert 0 <= args.quality <= 95, "Image quality must be between 0 and 95"
     url = args.url or input("Enter the url of the image: ")
 
-    print("Downloading image meta-information...")
+    if DEBUG: print("Downloading image meta-information...")
     image_info = ImageInfo(url)
 
     zoom = args.zoom
     if zoom is None:
-        print(image_info)
+        if DEBUG: print(image_info)
         while True:
             try:
                 zoom = int(input("Which level do you want to download? "))
                 assert 0 <= zoom < len(image_info.tile_info)
                 break
             except (ValueError, AssertionError):
-                print("Not a valid zoom level.")
+                if DEBUG: print("Not a valid zoom level.")
 
     coro = load_tiles(image_info, zoom, args.outfile, args.quality)
     loop = asyncio.get_event_loop()
